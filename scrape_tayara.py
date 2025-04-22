@@ -12,6 +12,65 @@ import re
 import json
 import os
 import sys
+import random
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
+
+# Define approximate coordinates for major Tunisian governorates
+GOVERNORATE_COORDINATES = {
+    'Tunis': [10.1815, 36.8065],
+    'Ariana': [10.1939, 36.8625],
+    'Ben Arous': [10.2233, 36.7535],
+    'Manouba': [10.0986, 36.8089],
+    'Nabeul': [10.6912, 36.4513],
+    'Bizerte': [9.8642, 37.2744],
+    'Zaghouan': [10.1428, 36.4028],
+    'Beja': [9.1844, 36.7256],
+    'Jendouba': [8.7550, 36.5012],
+    'Kef': [8.7047, 36.1675],
+    'Siliana': [9.3909, 36.0875],
+    'Sousse': [10.6412, 35.8245],
+    'Monastir': [10.7809, 35.7640],
+    'Mahdia': [11.0622, 35.5044],
+    'Kairouan': [10.0963, 35.6781],
+    'Kasserine': [8.8365, 35.1722],
+    'Sidi Bouzid': [9.4968, 35.0382],
+    'Sfax': [10.7600, 34.7400],
+    'Gabes': [10.0982, 33.8828],
+    'Medenine': [10.5050, 33.3450],
+    'Tataouine': [10.4507, 32.9227],
+    'Tozeur': [8.1335, 33.9185],
+    'Kebili': [8.9715, 33.7072],
+    'Gafsa': [8.7094, 34.4311]
+}
+
+def get_coordinates_from_location(location_text):
+    """
+    Extract coordinates from a location text, or use governorate mapping if available
+    """
+    # First check if any governorate is mentioned
+    for governorate, coords in GOVERNORATE_COORDINATES.items():
+        if governorate.lower() in location_text.lower():
+            # Add small random offset to avoid all properties being at exact same point
+            lng_offset = (random.random() - 0.5) * 0.05  # ±0.025 degrees longitude
+            lat_offset = (random.random() - 0.5) * 0.05  # ±0.025 degrees latitude
+            return [coords[0] + lng_offset, coords[1] + lat_offset]
+    
+    # Default to Tunis with wider randomization
+    lng = 10.1815  # Default to Tunis
+    lat = 36.8065  # Default to Tunis
+    lng_offset = (random.random() - 0.5) * 0.2  # Wider offset for more dispersion
+    lat_offset = (random.random() - 0.5) * 0.2
+    return [lng + lng_offset, lat + lat_offset]
+
+def extract_governorate(address):
+    """
+    Extract governorate from address text
+    """
+    for governorate in GOVERNORATE_COORDINATES.keys():
+        if governorate.lower() in address.lower():
+            return governorate
+    return None
 
 def scrape_tayara(location=None):
     """
@@ -135,6 +194,12 @@ def scrape_tayara(location=None):
                     full_description = title
                     image_urls = [image] if image else []
 
+                # Extract governorate from address
+                governorate = extract_governorate(location) or "Unknown"
+                
+                # Get coordinates based on governorate or address
+                coordinates = get_coordinates_from_location(location)
+
                 results.append({
                     "description": full_description,
                     "price": price,
@@ -143,6 +208,8 @@ def scrape_tayara(location=None):
                     "sourceUrl": detail_url,
                     "source": "tayara.tn",
                     "listedDate": datetime.now().strftime("%Y-%m-%d"),
+                    "governorate": governorate,
+                    "coordinates": coordinates
                 })
                 
                 if len(results) % 5 == 0:
@@ -189,16 +256,6 @@ def clean_and_enhance_data(results):
         df["images"] = df["images"].apply(lambda imgs: [img for img in imgs if isinstance(img, str) and img.startswith("http")])
     except Exception as e:
         print(f"Error in basic cleaning: {e}")
-
-    # 🏛 Governorate detection
-    governorates = [
-        "Tunis", "Ariana", "Ben Arous", "Manouba", "Nabeul", "Bizerte", "Zaghouan",
-        "Beja", "Jendouba", "Kef", "Siliana", "Sousse", "Monastir", "Mahdia", "Kairouan",
-        "Kasserine", "Sidi Bouzid", "Sfax", "Gabes", "Medenine", "Tataouine", "Tozeur", "Kebili", "Gafsa"
-    ]
-    df["governorate"] = df["address"].apply(
-        lambda addr: next((gov for gov in governorates if gov.lower() in addr.lower()), "Unknown")
-    )
 
     # 📏 Area extraction & price per sq ft
     def extract_area_m2(text):
@@ -261,42 +318,163 @@ def clean_and_enhance_data(results):
     # 💸 Add original price format
     df["originalPrice"] = df["price"].apply(lambda p: f"{p:,} DT".replace(",", " "))
 
-    # Add geocoordinates based on governorate (approximate)
-    geocoords = {
-        "Tunis": [10.1815, 36.8065],
-        "Ariana": [10.1939, 36.8625],
-        "Ben Arous": [10.2233, 36.7535],
-        "Sousse": [10.6412, 35.8245],
-        "Sfax": [10.7600, 34.7400],
-        "Monastir": [10.8090, 35.7780]
-    }
-    
-    def get_approx_coords(governorate):
-        if governorate in geocoords:
-            # Add a small random offset to avoid all properties in same location
-            import random
-            lat_offset = random.uniform(-0.01, 0.01)
-            lng_offset = random.uniform(-0.01, 0.01)
-            return [geocoords[governorate][0] + lng_offset, geocoords[governorate][1] + lat_offset]
-        return [10.1815, 36.8065]  # Default to Tunis
-    
-    df["coordinates"] = df["governorate"].apply(get_approx_coords)
-
-    # 📸 Convert image list to string for CSV
-    df["image_list"] = df["images"].copy()
-    df["images"] = df["images"].apply(lambda imgs: ", ".join(imgs) if isinstance(imgs, list) else imgs)
-
     # Add nearWater, roadAccess, utilities features
     df["nearWater"] = df["description"].apply(lambda desc: "mer" in desc.lower() or "lac" in desc.lower() if isinstance(desc, str) else False)
     df["roadAccess"] = True  # Assume all properties have road access
-    df["utilities"] = True   # Assume all properties have utilities
+    df["utilities"] = True    # Assume all properties have utilities
 
     return df
 
+def save_to_mongodb(data_df, mongodb_uri=None):
+    """
+    Save the processed data to MongoDB
+    
+    Args:
+        data_df: DataFrame with property data
+        mongodb_uri: MongoDB connection URI (default: localhost)
+    """
+    if mongodb_uri is None:
+        # Try to read from .env file
+        try:
+            with open('.env', 'r') as f:
+                for line in f:
+                    if line.strip().startswith('MONGODB_URI='):
+                        mongodb_uri = line.strip().split('=', 1)[1].strip('"\'')
+                        break
+        except:
+            pass
+            
+        # Use default local connection if not found
+        if not mongodb_uri:
+            mongodb_uri = "mongodb://127.0.0.1:27017/land-valuation"
+    
+    try:
+        # Connect to MongoDB
+        print(f"Connecting to MongoDB: {mongodb_uri}")
+        client = MongoClient(mongodb_uri, serverSelectionTimeoutMS=5000)
+        # Verify connection
+        client.server_info()
+        print("Successfully connected to MongoDB")
+        
+        # Get database
+        db_name = mongodb_uri.split('/')[-1]
+        db = client[db_name]
+        
+        # Get collection
+        properties_collection = db['properties']
+        
+        # Convert DataFrame to list of dictionaries
+        properties_data = data_df.to_dict(orient='records')
+        
+        # Process each property for MongoDB
+        processed_properties = []
+        for prop in properties_data:
+            # Basic MongoDB document structure
+            mongo_doc = {
+                "location": {
+                    "type": "Point",
+                    "coordinates": prop.get("coordinates", [10.1815, 36.8065])  # Default to Tunis if missing
+                },
+                "address": prop.get("address", ""),
+                "price": prop.get("price", 0),
+                "listedDate": datetime.now(),
+                "lastUpdated": datetime.now()
+            }
+            
+            # Add other fields if they exist
+            if "area" in prop and prop["area"]:
+                mongo_doc["area"] = prop["area"]
+            
+            if "pricePerSqFt" in prop and prop["pricePerSqFt"]:
+                mongo_doc["pricePerSqFt"] = prop["pricePerSqFt"]
+            
+            if "zoning" in prop:
+                mongo_doc["zoning"] = prop["zoning"]
+            
+            if "propertyType" in prop:
+                mongo_doc["propertyType"] = prop["propertyType"]
+            
+            if "governorate" in prop:
+                mongo_doc["governorate"] = prop["governorate"]
+                mongo_doc["city"] = prop["governorate"]  # Use governorate as city too
+                mongo_doc["state"] = "Tunisia"
+            
+            if "description" in prop:
+                mongo_doc["description"] = prop["description"]
+            
+            if "images" in prop:
+                mongo_doc["images"] = prop["images"]
+            
+            if "sourceUrl" in prop:
+                mongo_doc["sourceUrl"] = prop["sourceUrl"]
+            
+            if "source" in prop:
+                mongo_doc["source"] = prop["source"]
+            
+            if "originalPrice" in prop:
+                mongo_doc["originalPrice"] = prop["originalPrice"]
+            
+            if "originalArea" in prop:
+                mongo_doc["originalArea"] = prop["originalArea"]
+            
+            if "nearWater" in prop:
+                mongo_doc["features"] = {
+                    "nearWater": prop["nearWater"],
+                    "roadAccess": prop.get("roadAccess", True),
+                    "utilities": prop.get("utilities", True)
+                }
+            
+            processed_properties.append(mongo_doc)
+        
+        if processed_properties:
+            # Insert properties in batches
+            batch_size = 20
+            for i in range(0, len(processed_properties), batch_size):
+                batch = processed_properties[i:i+batch_size]
+                # Check for duplicates and only insert new properties
+                for doc in batch:
+                    # Use sourceUrl as unique identifier if available
+                    if "sourceUrl" in doc:
+                        existing = properties_collection.find_one({"sourceUrl": doc["sourceUrl"]})
+                        if not existing:
+                            properties_collection.insert_one(doc)
+                            print(f"Inserted new property: {doc.get('address', 'Unknown')}")
+                        else:
+                            print(f"Skipped duplicate property: {doc.get('address', 'Unknown')}")
+                    else:
+                        # Otherwise use combination of address and price as identifier
+                        existing = properties_collection.find_one({
+                            "address": doc["address"],
+                            "price": doc["price"]
+                        })
+                        if not existing:
+                            properties_collection.insert_one(doc)
+                            print(f"Inserted new property: {doc.get('address', 'Unknown')}")
+                        else:
+                            print(f"Skipped duplicate property: {doc.get('address', 'Unknown')}")
+            
+            print(f"Saved properties to MongoDB collection: properties")
+            return True
+        else:
+            print("No properties to save to MongoDB")
+            return False
+    
+    except (ConnectionFailure, ServerSelectionTimeoutError) as e:
+        print(f"MongoDB Connection Error: {e}")
+        return False
+    except Exception as e:
+        print(f"Error saving to MongoDB: {e}")
+        return False
+    finally:
+        if 'client' in locals():
+            client.close()
+            print("MongoDB connection closed")
+
 def main():
     # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Scrape real estate listings from tayara.tn')
+    parser = argparse.ArgumentParser(description='Scrape real estate listings from tayara.tn and save to MongoDB')
     parser.add_argument('--location', help='Location to search for properties', default=None)
+    parser.add_argument('--mongodb-uri', help='MongoDB URI', default=None)
     args = parser.parse_args()
 
     print(f"🚀 Starting scraper for location: {args.location or 'all locations'}")
@@ -319,21 +497,30 @@ def main():
     
     print(f"✅ Cleaned data - {len(df)} properties remaining")
     
-    # Save to CSV
-    csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "properties_enhanced.csv")
-    df.to_csv(csv_path, index=False)
-    print(f"💾 Saved to {csv_path}")
+    # Save to MongoDB
+    mongodb_success = save_to_mongodb(df, args.mongodb_uri)
     
-    # Also save to JSON format that's easier for Node.js to parse
-    # Convert all NaN/None values to null for JSON compatibility
-    df_json = df.where(pd.notnull(df), None)
+    if mongodb_success:
+        print("✅ Successfully saved to MongoDB")
+    else:
+        print("❌ Failed to save to MongoDB")
+        
+        # Save to CSV and JSON as backup
+        csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "properties_enhanced.csv")
+        df.to_csv(csv_path, index=False)
+        print(f"💾 Saved to {csv_path}")
+        
+        # Also save to JSON format
+        # Convert all NaN/None values to null for JSON compatibility
+        df_json = df.where(pd.notnull(df), None)
+        
+        # Save properties to JSON
+        json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "properties.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(df_json.to_dict(orient="records"), f, ensure_ascii=False, indent=2)
+        
+        print(f"💾 Saved to {json_path}")
     
-    # Save properties to JSON
-    json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "properties.json")
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(df_json.to_dict(orient="records"), f, ensure_ascii=False, indent=2)
-    
-    print(f"💾 Saved to {json_path}")
     print("🔚 Scraping complete")
 
 if __name__ == "__main__":
